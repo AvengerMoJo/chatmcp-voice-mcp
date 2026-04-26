@@ -1,42 +1,58 @@
 """
-HTTP wrapper for the Voice MCP server — curl-friendly testing endpoint.
+HTTP server for ChatMCP Voice — audio upload, text chat, bridge.
+
+Endpoints:
+  GET   /health           – server status
+  GET   /tools            – list tools
+  POST  /chat             – text in, text out (for testing)
+  POST  /voice_upload     – WAV file in, WAV file out (full pipeline)
+  POST  /bridge           – inject backend result
 
 Usage:
   python voice_http_server.py --port 9090 --no-model
-  curl http://localhost:9090/chat -d '{"text":"Hello"}'
-  curl http://localhost:9090/tools
+  curl -X POST http://localhost:9090/chat -d '{"text":"Hello"}'
+  curl -X POST http://localhost:9090/voice_upload -F "audio=@test.wav" -o response.wav
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
+import tempfile
 from typing import Any
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from voice_mcp_server import VoiceMCPServer
+from voice_pipeline import VoicePipeline
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger("voice-http")
 
 
 class VoiceHTTPHandler(BaseHTTPRequestHandler):
-    """HTTP handler exposing voice MCP functionality."""
-
     server: VoiceMCPServer  # set by main()
+    pipeline: VoicePipeline  # set by main()
 
     def do_GET(self) -> None:
         vs: VoiceMCPServer = VoiceHTTPHandler.server
         if self.path == "/tools":
-            self._respond({"tools": ["voice_query", "voice_bridge_result"]})
+            self._respond({"tools": ["voice_query", "voice_bridge_result", "voice_upload"]})
         elif self.path == "/health":
             loaded = vs.model is not None
-            self._respond({"status": "ok", "model_loaded": loaded})
+            pipeline_loaded = VoiceHTTPHandler.pipeline.is_loaded
+            self._respond({"status": "ok", "model_loaded": loaded, "pipeline_loaded": pipeline_loaded})
         else:
             self._respond({"error": "not found"}, 404)
 
     def do_POST(self) -> None:
         vs: VoiceMCPServer = VoiceHTTPHandler.server
+
+        if self.path == "/voice_upload":
+            self._handle_voice_upload()
+            return
+
+        # JSON endpoints
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
         try:
@@ -47,16 +63,74 @@ class VoiceHTTPHandler(BaseHTTPRequestHandler):
 
         if self.path == "/chat":
             text = data.get("text", "")
-            rpc_response = vs._handle_voice_query({"text": text}, None)
-            content = rpc_response.get("result", {}).get("content", [])
+            rpc = vs._handle_voice_query({"text": text}, None)
+            content = rpc.get("result", {}).get("content", [])
             self._respond({"response": content[0]["text"] if content else "no response"})
         elif self.path == "/bridge":
             result_text = data.get("result", "")
-            rpc_response = vs._handle_bridge_result({"result": result_text}, None)
-            content = rpc_response.get("result", {}).get("content", [])
+            rpc = vs._handle_bridge_result({"result": result_text}, None)
+            content = rpc.get("result", {}).get("content", [])
             self._respond({"response": content[0]["text"] if content else "injected"})
         else:
             self._respond({"error": "not found"}, 404)
+
+    # ── Voice upload ────────────────────────────────────────────
+
+    def _handle_voice_upload(self) -> None:
+        """Accept multipart WAV upload, return WAV response."""
+        content_type = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in content_type:
+            self._respond({"error": "multipart/form-data required"}, 400)
+            return
+
+        # Parse multipart — extract boundary and read audio field
+        boundary = content_type.split("boundary=")[-1].strip()
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length)
+
+        try:
+            audio_bytes = self._extract_multipart_audio(raw, boundary)
+        except ValueError as e:
+            self._respond({"error": str(e)}, 400)
+            return
+
+        # Process through voice pipeline
+        pipeline = VoiceHTTPHandler.pipeline
+        try:
+            wav_in = pipeline.pcm16_to_wav(audio_bytes, 16000)
+            response_wav = pipeline.process_audio(wav_in, 16000)
+        except Exception as e:
+            logger.error(f"Pipeline error: {e}")
+            self._respond({"error": f"pipeline error: {e}"}, 500)
+            return
+
+        # Return WAV response
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Disposition", 'attachment; filename="response.wav"')
+        self.end_headers()
+        self.wfile.write(response_wav)
+
+    @staticmethod
+    def _extract_multipart_audio(raw: bytes, boundary: str) -> bytes:
+        """Extract the first audio field from multipart data."""
+        boundary_bytes = f"--{boundary}".encode()
+        parts = raw.split(boundary_bytes)
+        for part in parts:
+            if b"Content-Disposition" not in part:
+                continue
+            # Find blank line separating headers from body
+            header_end = part.find(b"\r\n\r\n")
+            if header_end == -1:
+                continue
+            body = part[header_end + 4:]
+            # Strip trailing \r\n--\r\n
+            body = body.strip().rstrip(b"-").strip()
+            if len(body) > 44:  # minimum valid WAV header
+                return body
+        raise ValueError("No audio data found in upload")
+
+    # ── Response helpers ────────────────────────────────────────
 
     def _respond(self, data: Any, status: int = 200) -> None:
         self.send_response(status)
@@ -74,17 +148,30 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=9090)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--no-model", action="store_true")
+    parser.add_argument("--model", default="./models/minicpm-o")
     args = parser.parse_args()
 
-    server = VoiceMCPServer("./models/minicpm-o")
+    mcp_server = VoiceMCPServer(args.model)
     if not args.no_model:
-        server.start()
+        mcp_server.start()
     else:
         logger.info("Bridge-only mode (no model)")
 
-    VoiceHTTPHandler.server = server
+    pipeline = VoicePipeline(args.model)
+    if not args.no_model:
+        pipeline.load()
+    else:
+        logger.info("Pipeline in stub mode")
+
+    VoiceHTTPHandler.server = mcp_server
+    VoiceHTTPHandler.pipeline = pipeline
     httpd = HTTPServer((args.host, args.port), VoiceHTTPHandler)
     logger.info(f"HTTP server listening on http://{args.host}:{args.port}")
+    logger.info(f"  POST /chat          — text in, text out")
+    logger.info(f"  POST /voice_upload   — WAV in, WAV out (full pipeline)")
+    logger.info(f"  POST /bridge         — inject backend result")
+    logger.info(f"  GET  /health         — server status")
+    logger.info(f"  GET  /tools          — list tools")
     httpd.serve_forever()
 
 
