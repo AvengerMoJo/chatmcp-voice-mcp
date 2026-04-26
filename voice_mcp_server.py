@@ -118,8 +118,15 @@ class VoiceMCPServer:
     def _handle_voice_query(self, args: dict, req_id: Any) -> dict:
         text = args["text"]
         if self.model is None:
-            return {"jsonrpc": "2.0", "id": req_id,
-                    "error": {"code": -32000, "message": "Model not loaded"}}
+            # --no-model mode: return mock response for testing
+            if "[bridge]" in text:
+                result = f"[bridge trigger detected: {text}]"
+            else:
+                result = f"Mock response: {text[:200]}"
+            return {
+                "jsonrpc": "2.0", "id": req_id,
+                "result": {"content": [{"type": "text", "text": result}]},
+            }
 
         result = self.model.chat(text)
         return {

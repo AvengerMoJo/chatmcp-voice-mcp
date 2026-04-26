@@ -47,12 +47,14 @@ class VoiceHTTPHandler(BaseHTTPRequestHandler):
 
         if self.path == "/chat":
             text = data.get("text", "")
-            result = vs._handle_voice_query({"text": text}, None)
-            self._respond(result.get("result", result))
+            rpc_response = vs._handle_voice_query({"text": text}, None)
+            content = rpc_response.get("result", {}).get("content", [])
+            self._respond({"response": content[0]["text"] if content else "no response"})
         elif self.path == "/bridge":
-            result = data.get("result", "")
-            r = vs._handle_bridge_result({"result": result}, None)
-            self._respond(r.get("result", r))
+            result_text = data.get("result", "")
+            rpc_response = vs._handle_bridge_result({"result": result_text}, None)
+            content = rpc_response.get("result", {}).get("content", [])
+            self._respond({"response": content[0]["text"] if content else "injected"})
         else:
             self._respond({"error": "not found"}, 404)
 
