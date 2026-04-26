@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ChatMCP Voice Test</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #111; color: #eee; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+  .card { background: #1a1a2e; border-radius: 20px; padding: 40px; width: 420px; box-shadow: 0 20px 60px rgba(0,0,0,.5); text-align: center; }
+  h1 { font-size: 22px; margin-bottom: 6px; }
+  .sub { color: #888; font-size: 13px; margin-bottom: 30px; }
+  .server-row { display: flex; gap: 8px; margin-bottom: 24px; }
+  .server-row input { flex: 1; background: #16213e; border: 1px solid #333; border-radius: 10px; padding: 10px 14px; color: #eee; font-size: 14px; outline: none; }
+  .server-row input:focus { border-color: #0f3460; }
+  .status { font-size: 13px; margin-bottom: 20px; min-height: 20px; }
+  .status.ok { color: #4ade80; }
+  .status.err { color: #f87171; }
+  .btn-row { display: flex; gap: 10px; margin-bottom: 20px; }
+  .btn { flex: 1; padding: 14px; border: none; border-radius: 12px; font-size: 15px; font-weight: 600; cursor: pointer; transition: all .2s; }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-record { background: #e11d48; color: #fff; }
+  .btn-record:hover:not(:disabled) { background: #be123c; }
+  .btn-record.recording { animation: pulse 1s infinite; }
+  .btn-stop { background: #6366f1; color: #fff; }
+  .btn-stop:hover:not(:disabled) { background: #4f46e5; }
+  .btn-send { background: #22c55e; color: #fff; }
+  .btn-send:hover:not(:disabled) { background: #16a34a; }
+  .btn-clear { background: #444; color: #eee; }
+  .btn-clear:hover:not(:disabled) { background: #555; }
+  @keyframes pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+  .waveform { background: #0f3460; border-radius: 12px; height: 80px; margin-bottom: 20px; display: flex; align-items: center; justify-content: center; font-size: 13px; color: #666; overflow: hidden; position: relative; }
+  .waveform canvas { width: 100%; height: 100%; }
+  audio { width: 100%; margin-bottom: 16px; border-radius: 8px; }
+  .log { background: #0d0d1a; border-radius: 12px; padding: 14px; max-height: 160px; overflow-y: auto; font-size: 12px; font-family: monospace; text-align: left; line-height: 1.6; color: #aaa; }
+  .log .info { color: #60a5fa; }
+  .log .warn { color: #fbbf24; }
+  .log .err { color: #f87171; }
+  .log .resp { color: #4ade80; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🎙️ ChatMCP Voice</h1>
+  <p class="sub">Record → send to voice server → hear response</p>
+
+  <div class="server-row">
+    <input id="serverUrl" value="http://localhost:9090" placeholder="Server URL">
+    <button class="btn" style="flex:0;padding:10px 16px;background:#333" onclick="checkHealth()">🔍</button>
+  </div>
+  <div id="status" class="status">Enter server URL and click 🔍</div>
+
+  <div class="waveform" id="waveform"><canvas id="canvas"></canvas></div>
+
+  <div class="btn-row">
+    <button id="btnRecord" class="btn btn-record" onclick="toggleRecord()">🎤 Record</button>
+    <button id="btnStop" class="btn btn-stop" disabled onclick="stopRecording()">⏹ Stop</button>
+  </div>
+  <div class="btn-row">
+    <button id="btnSend" class="btn btn-send" disabled onclick="sendAudio()">📤 Send & Listen</button>
+    <button class="btn btn-clear" onclick="clearLog()">🗑 Clear</button>
+  </div>
+
+  <audio id="player" controls></audio>
+  <div id="log" class="log">Ready.</div>
+</div>
+
+<script>
+// ── State ────────────────────────────────────────────────────
+let mediaRecorder = null;
+let audioChunks = [];
+let recordedBlob = null;
+let audioCtx = null;
+let analyser = null;
+let animFrame = null;
+
+const $ = id => document.getElementById(id);
+const log = $('log');
+const status = $('status');
+const player = $('player');
+const canvas = $('canvas');
+const ctx = canvas.getContext('2d');
+
+canvas.width = canvas.parentElement.clientWidth;
+canvas.height = 80;
+
+// ── Server health ────────────────────────────────────────────
+async function checkHealth() {
+  const base = $('serverUrl').value.replace(/\/+$/, '');
+  try {
+    const r = await fetch(base + '/health', { signal: AbortSignal.timeout(5000) });
+    const d = await r.json();
+    status.className = 'status ok';
+    status.textContent = '✅ Server OK · model:' + (d.model_loaded ? 'loaded' : 'stub') + ' pipeline:' + (d.pipeline_loaded ? 'loaded' : 'stub');
+    logMsg('info', `Health: ${JSON.stringify(d)}`);
+  } catch(e) {
+    status.className = 'status err';
+    status.textContent = '❌ ' + e.message;
+    logMsg('err', `Health failed: ${e.message}`);
+  }
+}
+
+// ── Recording ────────────────────────────────────────────────
+async function toggleRecord() {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    stopRecording();
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioCtx = new AudioContext();
+    const src = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    src.connect(analyser);
+
+    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+    audioChunks = [];
+
+    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
+    mediaRecorder.onstop = () => {
+      recordedBlob = new Blob(audioChunks, { type: 'audio/webm' });
+      $('btnSend').disabled = false;
+      logMsg('info', `Recorded ${(recordedBlob.size / 1024).toFixed(1)}KB`);
+      stream.getTracks().forEach(t => t.stop());
+      if (audioCtx) { audioCtx.close(); audioCtx = null; }
+      cancelAnimationFrame(animFrame);
+    };
+
+    mediaRecorder.start();
+    $('btnRecord').classList.add('recording');
+    $('btnRecord').textContent = '🔴 Recording...';
+    $('btnStop').disabled = false;
+    logMsg('info', 'Recording started');
+    drawWaveform();
+
+  } catch(e) {
+    logMsg('err', 'Mic error: ' + e.message);
+  }
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+    $('btnRecord').classList.remove('recording');
+    $('btnRecord').textContent = '🎤 Record';
+    $('btnStop').disabled = true;
+  }
+}
+
+function drawWaveform() {
+  if (!analyser) return;
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteTimeDomainData(data);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = '#4ade80';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i = 0; i < data.length; i++) {
+    const x = (i / data.length) * canvas.width;
+    const y = (data[i] / 128) * (canvas.height / 2);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  animFrame = requestAnimationFrame(drawWaveform);
+}
+
+// ── Send ─────────────────────────────────────────────────────
+async function sendAudio() {
+  if (!recordedBlob) return;
+  const base = $('serverUrl').value.replace(/\/+$/, '');
+  const form = new FormData();
+  form.append('audio', recordedBlob, 'recording.webm');
+
+  $('btnSend').disabled = true;
+  $('btnSend').textContent = '⏳ Sending...';
+
+  try {
+    // WebM → WAV conversion needed for the server, but let's try raw first
+    const r = await fetch(base + '/voice_upload', { method: 'POST', body: form, signal: AbortSignal.timeout(30000) });
+    if (!r.ok) {
+      const text = await r.text();
+      throw new Error(`${r.status}: ${text.slice(0, 200)}`);
+    }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    player.src = url;
+    player.play();
+    logMsg('resp', `Response: ${(blob.size / 1024).toFixed(1)}KB`);
+    $('btnSend').textContent = '🔁 Send Again';
+  } catch(e) {
+    logMsg('err', `Send error: ${e.message}`);
+    $('btnSend').textContent = '📤 Send & Listen';
+  }
+  $('btnSend').disabled = false;
+}
+
+// ── Logging ──────────────────────────────────────────────────
+function logMsg(cls, msg) {
+  const el = document.createElement('div');
+  el.className = cls;
+  el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+}
+
+function clearLog() {
+  log.innerHTML = 'Cleared.';
+}
+
+// ── Auto-check on load ───────────────────────────────────────
+setTimeout(checkHealth, 500);
+</script>
+</body>
+</html>
