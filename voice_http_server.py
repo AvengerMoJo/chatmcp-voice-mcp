@@ -25,19 +25,18 @@ class VoiceHTTPHandler(BaseHTTPRequestHandler):
 
     server: VoiceMCPServer  # set by main()
 
-    def voice_server(self) -> VoiceMCPServer:
-        return self.__class__.server
-
     def do_GET(self) -> None:
+        vs: VoiceMCPServer = VoiceHTTPHandler.server
         if self.path == "/tools":
             self._respond({"tools": ["voice_query", "voice_bridge_result"]})
         elif self.path == "/health":
-            loaded = self.voice_server.model is not None
+            loaded = vs.model is not None
             self._respond({"status": "ok", "model_loaded": loaded})
         else:
             self._respond({"error": "not found"}, 404)
 
     def do_POST(self) -> None:
+        vs: VoiceMCPServer = VoiceHTTPHandler.server
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
         try:
@@ -48,11 +47,11 @@ class VoiceHTTPHandler(BaseHTTPRequestHandler):
 
         if self.path == "/chat":
             text = data.get("text", "")
-            result = self.voice_server._handle_voice_query({"text": text}, None)
+            result = vs._handle_voice_query({"text": text}, None)
             self._respond(result.get("result", result))
         elif self.path == "/bridge":
             result = data.get("result", "")
-            r = self.voice_server._handle_bridge_result({"result": result}, None)
+            r = vs._handle_bridge_result({"result": result}, None)
             self._respond(r.get("result", r))
         else:
             self._respond({"error": "not found"}, 404)
