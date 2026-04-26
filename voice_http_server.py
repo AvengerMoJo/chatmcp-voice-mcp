@@ -21,6 +21,7 @@ import logging
 import os
 import sys
 import tempfile
+from pathlib import Path
 from typing import Any
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from voice_mcp_server import VoiceMCPServer
@@ -34,9 +35,21 @@ class VoiceHTTPHandler(BaseHTTPRequestHandler):
     server: VoiceMCPServer  # set by main()
     pipeline: VoicePipeline  # set by main()
 
+    def _send_cors(self) -> None:
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(204)
+        self._send_cors()
+        self.end_headers()
+
     def do_GET(self) -> None:
         vs: VoiceMCPServer = VoiceHTTPHandler.server
-        if self.path == "/tools":
+        if self.path == "/" or self.path == "/index.html":
+            self._serve_html()
+        elif self.path == "/tools":
             self._respond({"tools": ["voice_query", "voice_bridge_result", "voice_upload"]})
         elif self.path == "/health":
             loaded = vs.model is not None
@@ -44,6 +57,18 @@ class VoiceHTTPHandler(BaseHTTPRequestHandler):
             self._respond({"status": "ok", "model_loaded": loaded, "pipeline_loaded": pipeline_loaded})
         else:
             self._respond({"error": "not found"}, 404)
+
+    def _serve_html(self) -> None:
+        html_path = Path(__file__).parent / "voice_test.html"
+        if not html_path.exists():
+            self._respond({"error": "voice_test.html not found"}, 404)
+            return
+        self.send_response(200)
+        self._send_cors()
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        with open(html_path, "rb") as f:
+            self.wfile.write(f.read())
 
     def do_POST(self) -> None:
         vs: VoiceMCPServer = VoiceHTTPHandler.server
@@ -106,6 +131,7 @@ class VoiceHTTPHandler(BaseHTTPRequestHandler):
 
         # Return WAV response
         self.send_response(200)
+        self._send_cors()
         self.send_header("Content-Type", "audio/wav")
         self.send_header("Content-Disposition", 'attachment; filename="response.wav"')
         self.end_headers()
@@ -134,6 +160,7 @@ class VoiceHTTPHandler(BaseHTTPRequestHandler):
 
     def _respond(self, data: Any, status: int = 200) -> None:
         self.send_response(status)
+        self._send_cors()
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(data).encode())
@@ -167,6 +194,7 @@ def main() -> None:
     VoiceHTTPHandler.pipeline = pipeline
     httpd = HTTPServer((args.host, args.port), VoiceHTTPHandler)
     logger.info(f"HTTP server listening on http://{args.host}:{args.port}")
+    logger.info(f"  Open http://{args.host}:{args.port}  — Web UI (voice recorder)")
     logger.info(f"  POST /chat          — text in, text out")
     logger.info(f"  POST /voice_upload   — WAV in, WAV out (full pipeline)")
     logger.info(f"  POST /bridge         — inject backend result")
