@@ -26,6 +26,7 @@ from typing import Any
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from voice_mcp_server import VoiceMCPServer
 from voice_pipeline import VoicePipeline
+from models.minicpm_o_model import MiniCPMoModel
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger("voice-http")
@@ -120,12 +121,23 @@ class VoiceHTTPHandler(BaseHTTPRequestHandler):
             return
 
         # Process through voice pipeline
-        pipeline = VoiceHTTPHandler.pipeline
+        vs = VoiceHTTPHandler.server
         try:
-            # Convert whatever format the browser sent to PCM16 WAV
             wav_bytes = self._to_wav(audio_bytes)
-            pcm16, sr = pipeline.wav_to_pcm16(wav_bytes)
-            response_wav = pipeline.process_audio(pcm16, sr)
+
+            if vs.model is not None and vs.model.is_loaded:
+                # Real MiniCPM-o: audio in, audio out (end-to-end)
+                logger.info("Using MiniCPM-o end-to-end")
+                response_wav = vs.model.chat_bytes(wav_bytes)
+            else:
+                # Fallback: cascaded pipeline (ASR→LLM→TTS)
+                logger.info("Using fallback pipeline")
+                pipeline = VoiceHTTPHandler.pipeline
+                pcm16, sr = MiniCPMoModel._read_wav(
+                    __import__("io").BytesIO(wav_bytes)
+                )
+                response_wav = pipeline.process_audio(pcm16, sr)
+
         except Exception as e:
             logger.error(f"Pipeline error: {e}")
             self._respond({"error": f"pipeline error: {e}"}, 500)
