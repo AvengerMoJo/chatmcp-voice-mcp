@@ -132,7 +132,7 @@ class VoiceMCPServer:
         logger.info(f"Injecting bridge result: {result[:200]}...")
         return {
             "jsonrpc": "2.0", "id": req_id,
-            "result": {"content": [{"type": "text", "text": f"Injected: {result[:100]}..."]}]},
+            "result": {"content": [{"type": "text", "text": f"Injected: {result[:100]}..."}]},
         }
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from voice_mcp_server import VoiceMCPServer
 
