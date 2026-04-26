@@ -1,0 +1,6 @@
+name: voice
+version: 0.1.0
+repo: https://github.com/AvengerMoJo/chatmcp-voice-mcp
+entrypoint: voice_mcp_server.py
+runtime: python3
+description: Voice bridge with MiniCPM-o end-to-end speech to speech model with ChatMCP routing
