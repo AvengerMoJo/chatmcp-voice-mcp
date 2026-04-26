@@ -176,6 +176,9 @@ def main() -> None:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--no-model", action="store_true")
     parser.add_argument("--model", default="./models/minicpm-o")
+    parser.add_argument("--https", action="store_true", help="Enable HTTPS with self-signed cert")
+    parser.add_argument("--cert-file", default=None, help="Path to SSL cert (auto-generated if not set)")
+    parser.add_argument("--key-file", default=None, help="Path to SSL key (auto-generated if not set)")
     args = parser.parse_args()
 
     mcp_server = VoiceMCPServer(args.model)
@@ -193,7 +196,34 @@ def main() -> None:
     VoiceHTTPHandler.server = mcp_server
     VoiceHTTPHandler.pipeline = pipeline
     httpd = HTTPServer((args.host, args.port), VoiceHTTPHandler)
-    logger.info(f"HTTP server listening on http://{args.host}:{args.port}")
+    protocol = "http"
+
+    if args.https or args.cert_file:
+        import ssl
+        cert_file = args.cert_file
+        key_file = args.key_file
+        if not cert_file or not key_file:
+            # Auto-generate self-signed cert
+            import tempfile, subprocess
+            cert_dir = Path(tempfile.gettempdir()) / ".voice-mcp-certs"
+            cert_dir.mkdir(exist_ok=True)
+            cert_file = str(cert_dir / "cert.pem")
+            key_file = str(cert_dir / "key.pem")
+            if not Path(cert_file).exists():
+                subprocess.run([
+                    "openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", key_file,
+                    "-out", cert_file, "-days", "365", "-nodes",
+                    "-subj", "/CN=localhost"
+                ], capture_output=True)
+                logger.info(f"Generated self-signed cert at {cert_file}")
+
+        ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        ssl_ctx.load_cert_chain(cert_file, key_file)
+        httpd.socket = ssl_ctx.wrap_socket(httpd.socket, server_side=True)
+        protocol = "https"
+
+    logger.info(f"{protocol.upper()} server listening on {protocol}://{args.host}:{args.port}")
+    logger.info(f"  Open {protocol}://{args.host}:{args.port}  — Web UI (voice recorder)")
     logger.info(f"  Open http://{args.host}:{args.port}  — Web UI (voice recorder)")
     logger.info(f"  POST /chat          — text in, text out")
     logger.info(f"  POST /voice_upload   — WAV in, WAV out (full pipeline)")
