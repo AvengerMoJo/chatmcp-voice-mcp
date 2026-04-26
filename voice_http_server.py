@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from typing import Any
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from voice_mcp_server import VoiceMCPServer
 
@@ -24,11 +25,15 @@ class VoiceHTTPHandler(BaseHTTPRequestHandler):
 
     server: VoiceMCPServer  # set by main()
 
+    def voice_server(self) -> VoiceMCPServer:
+        return self.__class__.server
+
     def do_GET(self) -> None:
         if self.path == "/tools":
             self._respond({"tools": ["voice_query", "voice_bridge_result"]})
         elif self.path == "/health":
-            self._respond({"status": "ok", "model_loaded": self.server.model is not None})
+            loaded = self.voice_server.model is not None
+            self._respond({"status": "ok", "model_loaded": loaded})
         else:
             self._respond({"error": "not found"}, 404)
 
@@ -43,16 +48,16 @@ class VoiceHTTPHandler(BaseHTTPRequestHandler):
 
         if self.path == "/chat":
             text = data.get("text", "")
-            result = self.server._handle_voice_query({"text": text}, None)
+            result = self.voice_server._handle_voice_query({"text": text}, None)
             self._respond(result.get("result", result))
         elif self.path == "/bridge":
             result = data.get("result", "")
-            r = self.server._handle_bridge_result({"result": result}, None)
+            r = self.voice_server._handle_bridge_result({"result": result}, None)
             self._respond(r.get("result", r))
         else:
             self._respond({"error": "not found"}, 404)
 
-    def _respond(self, data: dict | list | str, status: int = 200) -> None:
+    def _respond(self, data: Any, status: int = 200) -> None:
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
