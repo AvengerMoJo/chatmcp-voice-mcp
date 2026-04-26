@@ -122,8 +122,10 @@ class VoiceHTTPHandler(BaseHTTPRequestHandler):
         # Process through voice pipeline
         pipeline = VoiceHTTPHandler.pipeline
         try:
-            wav_in = pipeline.pcm16_to_wav(audio_bytes, 16000)
-            response_wav = pipeline.process_audio(wav_in, 16000)
+            # Convert whatever format the browser sent to PCM16 WAV
+            wav_bytes = self._to_wav(audio_bytes)
+            pcm16, sr = pipeline.wav_to_pcm16(wav_bytes)
+            response_wav = pipeline.process_audio(pcm16, sr)
         except Exception as e:
             logger.error(f"Pipeline error: {e}")
             self._respond({"error": f"pipeline error: {e}"}, 500)
@@ -136,6 +138,26 @@ class VoiceHTTPHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Disposition", 'attachment; filename="response.wav"')
         self.end_headers()
         self.wfile.write(response_wav)
+
+    @staticmethod
+    def _to_wav(raw_bytes: bytes) -> bytes:
+        """Convert any audio format to WAV using ffmpeg, or return as-is if already WAV."""
+        if raw_bytes[:4] == b"RIFF" and b"WAVE" in raw_bytes[:12]:
+            return raw_bytes  # already WAV
+        try:
+            import subprocess as sp
+            p = sp.run(
+                ["ffmpeg", "-y", "-i", "pipe:0", "-f", "wav", "-acodec", "pcm_s16le",
+                 "-ar", "16000", "-ac", "1", "pipe:1"],
+                input=raw_bytes, capture_output=True, timeout=15,
+            )
+            if p.returncode == 0 and len(p.stdout) > 44:
+                return p.stdout
+        except FileNotFoundError:
+            logger.warning("ffmpeg not found, returning raw bytes (may fail)")
+        except Exception as e:
+            logger.warning(f"ffmpeg conversion failed: {e}")
+        return raw_bytes
 
     @staticmethod
     def _extract_multipart_audio(raw: bytes, boundary: str) -> bytes:
