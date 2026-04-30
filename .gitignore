@@ -216,3 +216,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# llama.cpp-omni build artifacts
+llama.cpp-omni/build/
+llama.cpp-omni/bin/
+llama.cpp-omni/*.so
+llama.cpp-omni/*.log
+
+# Model files (too large to commit)
+models/*.gguf
+models/**/*.gguf
+.lmstudio/
